@@ -424,30 +424,70 @@ class KernelkitOperator:
             The operator communicates Tomosipo geometries towards
             the world, but internally converts them to KernelKit geometries.
         """
+        super(KernelkitOperator, self).__init__()
+
+        # TODO(Adriaan): should I also use "ASTRA compat" geoms here?
+        self.volume_geometry = volume_geometry
+        self.projection_geometry = projection_geometry
+        self.additive = additive
+        self._transpose = BackprojectionOperator(self)
+
+    @property
+    def volume_geometry(self):
+        return self._volume_geometry
+
+    @volume_geometry.setter
+    def volume_geometry(self, volume_geometry):
+        self._volume_geometry = volume_geometry
+        self._kk_vg = self._to_kernelkit_volume_geometry(volume_geometry)
+        has_geometries = (
+             hasattr(self, '_volume_geometry')
+             and hasattr(self, '_projection_geometry'))
+
+        if has_geometries:
+            self.compile()
+
+    @property
+    def projection_geometry(self):
+        return self._projection_geometry
+
+    @projection_geometry.setter
+    def projection_geometry(self, projection_geometry):
+        self._projection_geometry = projection_geometry
+        self._kk_pg = self._to_kernelkit_scan_geometry(projection_geometry)
+
+        has_geometries = (
+            hasattr(self, '_volume_geometry')
+            and hasattr(self, '_projection_geometry'))
+        if has_geometries:
+            self.compile()
+
+    def compile(
+        self,
+        projection_axes=(1, 0, 2),
+        volume_axes=(0, 1, 2),
+    ):
         # TODO(Adriaan): better way to import without a dependency?
         import kernelkit as kk
 
-        super(KernelkitOperator, self).__init__()
-
-        # convert geometries
-        # TODO(Adriaan): should I also use "ASTRA compat" geoms here?
-        kk_vg = self._to_kernelkit_volume_geometry(volume_geometry)
-        kk_pg = self._to_kernelkit_scan_geometry(projection_geometry)
-
         # set up projectors and use KernelKit operator
-        fp = kk.ForwardProjector()
-        fp.volume_geometry = kk_vg
-        fp.projection_geometry = kk_pg
-        bp = kk.BackProjector()
-        bp.volume_geometry = kk_vg
-        bp.projection_geometry = kk_pg
-        self.kernelkit_op = kk.ProjectorOperator(fp, bp)
+        kwargs = {
+            'projection_axes': projection_axes,
+            'volume_axes': volume_axes
+        }
+        fp = kk.ForwardProjector(**kwargs)
+        fp.volume_geometry = self._kk_vg
+        fp.projection_geometry = self._kk_pg
 
-        # TODO(Adriaan): add setters that handle/avoid changes to geometries
-        self.additive = additive
-        self.volume_geometry = volume_geometry
-        self.projection_geometry = projection_geometry
-        self._transpose = BackprojectionOperator(self)
+        # TODO(Adriaan): unfortunately, ASTRA/Tomosipo default is inefficient.
+        if projection_axes[0] != 0:
+            kwargs |= {'texture_type': 'array'}
+
+        bp = kk.BackProjector(**kwargs)
+        bp.volume_geometry = self._kk_vg
+        bp.projection_geometry = self._kk_pg
+
+        self.kernelkit_op = kk.ProjectorOperator(fp, bp)
 
     def _to_kernelkit_volume_geometry(self, volume_geometry):
         import kernelkit as kk
@@ -465,30 +505,34 @@ class KernelkitOperator:
         import kernelkit as kk
 
         if not projection_geometry.is_cone:
-            raise NotImplementedError("Other geometries than conebeam are "
-                                      "not yet implemented. Please file "
-                                      "an issue if you need one.")
+            raise NotImplementedError(
+                "Other geometries than conebeam are not yet implemented. "
+                "Please file an issue if you need one.")
         assert isinstance(projection_geometry, ConeGeometry), (
-            "Unexpected geometry type."
-        )
+            "Unexpected geometry type.")
 
-        pix_h = projection_geometry.det_size[0] / projection_geometry.det_shape[0]
-        pix_w = projection_geometry.det_size[1] / projection_geometry.det_shape[1]
+        pixel_height = (
+            projection_geometry.det_size[0] / projection_geometry.det_shape[0])
+        pixel_width = (
+            projection_geometry.det_size[1] / projection_geometry.det_shape[1])
         det = kk.Detector(
             rows=projection_geometry.det_shape[0],
             cols=projection_geometry.det_shape[1],
-            pixel_height=pix_h,
-            pixel_width=pix_w
-        )
+            pixel_height=pixel_height,
+            pixel_width=pixel_width)
 
-        scan = [kk.ProjectionGeometry(
-            source_position=projection_geometry.src_pos[i],
-            detector_position=projection_geometry.det_pos[i],
-            u=(projection_geometry.det_u[i] / np.linalg.norm(projection_geometry.det_u[i])),
-            v=(projection_geometry.det_v[i] / np.linalg.norm(projection_geometry.det_v[i])),
-            detector=det,
-            beam=kk.Beam.CONE
-        ) for i in range(projection_geometry.num_angles)]
+        scan = []
+        for i in range(projection_geometry.num_angles):
+            pg = kk.ProjectionGeometry(
+                source_position=projection_geometry.src_pos[i],
+                detector_position=projection_geometry.det_pos[i],
+                u=(projection_geometry.det_u[i] / np.linalg.norm(
+                    projection_geometry.det_u[i])),
+                v=(projection_geometry.det_v[i] / np.linalg.norm(
+                    projection_geometry.det_v[i])),
+                detector=det,
+                beam=kk.Beam.CONE)
+            scan.append(pg)
 
         return scan
 
